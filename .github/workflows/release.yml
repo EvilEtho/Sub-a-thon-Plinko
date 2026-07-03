@@ -1,0 +1,32 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g.:  git tag v1.0.0 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write # electron-builder publishes the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm test
+
+      # Build the installer and publish it to a GitHub Release for electron-updater to find.
+      # TWITCH_CLIENT_ID is the built-in PUBLIC client id (Device Code Flow — no secret).
+      - run: npm run release
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

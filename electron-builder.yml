@@ -1,0 +1,28 @@
+appId: com.evilee.subathonplinko
+productName: Subathon Plinko
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - resources/**
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Subathon Plinko
+# Update feed for electron-updater. Fill in your GitHub owner/repo (or delete this block to
+# disable updates). Releases are published by the `release` npm script / CI. See RELEASING.md.
+publish:
+  provider: github
+  owner: eviletho
+  repo: Sub-a-thon-Plinko

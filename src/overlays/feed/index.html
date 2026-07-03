@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/icon.png" />
+    <title>Plinko Feed</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: var(--font, 'Segoe UI', system-ui, sans-serif);
+      }
+      #feed {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        right: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        border-radius: var(--radius, 10px);
+        background: var(--panel, rgba(20, 16, 31, 0.82));
+        border-left: 4px solid var(--accent, #ff4d8d);
+        color: var(--text, #fff);
+        box-shadow: 0 0 16px rgba(0, 0, 0, 0.4);
+        animation: slidein 0.28s ease;
+      }
+      .item.leaving {
+        animation: fadeout 0.4s ease forwards;
+      }
+      .item .who {
+        font-weight: 700;
+      }
+      .item .what {
+        color: var(--muted, #cbb9e6);
+        font-size: var(--feed-size, 15px);
+      }
+      .k-sub {
+        border-left-color: var(--k-sub, #a06bff);
+      }
+      .k-bits {
+        border-left-color: var(--k-bits, #5cc8ff);
+      }
+      .k-donation {
+        border-left-color: var(--k-donation, #3ad6a0);
+      }
+      .k-cc {
+        border-left-color: var(--k-cc, #ffb84d);
+      }
+      .k-jackpot {
+        border-left-color: var(--k-jackpot, #ffd54d);
+        box-shadow: 0 0 22px var(--k-jackpot, #ffd54d);
+      }
+      .k-prize {
+        border-left-color: var(--k-prize, #3ad6a0);
+        box-shadow: 0 0 22px var(--k-prize, #3ad6a0);
+      }
+      @keyframes slidein {
+        from {
+          opacity: 0;
+          transform: translateX(-16px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes fadeout {
+        to {
+          opacity: 0;
+          transform: translateX(-16px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="feed"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
