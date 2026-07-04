@@ -61,6 +61,7 @@ export class PixiStage {
   private ballVisuals = new Map<string, BallVisual>()
   private avatarTextures = new Map<string, Texture>()
   private active = false
+  private lastActiveAt = 0
 
   async init(mount: HTMLElement): Promise<void> {
     await this.app.init({ backgroundAlpha: 0, antialias: true, resizeTo: window })
@@ -201,6 +202,14 @@ export class PixiStage {
 
   setActive(active: boolean): void {
     this.active = active
+    if (active) this.lastActiveAt = performance.now()
+  }
+
+  /** Live-patch idle-fade settings without rebuilding the board (keeps in-flight balls). */
+  patchFade(idleFade: boolean, idleFadeOpacity: number, idleFadeLingerSec: number): void {
+    this.theme.idleFade = idleFade
+    this.theme.idleFadeOpacity = idleFadeOpacity
+    this.theme.idleFadeLingerSec = idleFadeLingerSec
   }
 
   /** Number of live ball visuals (for debugging/regression checks). */
@@ -323,9 +332,14 @@ export class PixiStage {
   }
 
   private renderFx(): void {
-    // Idle fade of the board (balls stay full alpha).
-    const targetAlpha = !this.theme.idleFade || this.active ? 1 : 0.12
-    this.boardGroup.alpha += (targetAlpha - this.boardGroup.alpha) * 0.08
+    // Idle fade of the board (balls stay full alpha). Stay lit for a linger window after the
+    // last ball, then ease to the configured opacity (0 = fully hidden). Fade in faster than
+    // out so the board is already up before a ball reaches the pegs.
+    const lingerMs = (this.theme.idleFadeLingerSec ?? 2.5) * 1000
+    const lit = !this.theme.idleFade || this.active || performance.now() - this.lastActiveAt < lingerMs
+    const targetAlpha = lit ? 1 : (this.theme.idleFadeOpacity ?? 0.12)
+    const rate = targetAlpha > this.boardGroup.alpha ? 0.16 : 0.05
+    this.boardGroup.alpha += (targetAlpha - this.boardGroup.alpha) * rate
     for (const v of this.slotVisuals) {
       if (v && v.flash > 0) {
         v.flash = Math.max(0, v.flash - 0.05)

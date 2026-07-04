@@ -9,9 +9,10 @@ import {
   type StuckBehavior
 } from '@shared/schema/board.schema'
 import type { SlotConfig, SlotOutcome } from '@shared/schema/slots.schema'
+import { RANDOM_PRIZE_ID, type Prize } from '@shared/schema/prize.schema'
 import type { TimerConfig } from '@shared/schema/timer.schema'
 import type { CurrencyMode } from '@shared/schema/rules.schema'
-import { OVERLAY_FONTS, GOAL_STAT_KEYS, type GoalStatKey } from '@shared/schema/overlay.schema'
+import { OVERLAY_FONTS, GOAL_STAT_KEYS, type GoalStatKey, type OverlayTheme } from '@shared/schema/overlay.schema'
 import type { Layout } from '@shared/schema/layout.schema'
 import { BOARD_PRESETS, DEFAULT_PRESET, applyPreset, type BoardPreset } from '@shared/board/presets'
 import { THEME_PRESETS, applyThemePreset } from '@shared/board/themePresets'
@@ -54,6 +55,7 @@ interface DragState {
   s0: number
   a0: number
   l0: number
+  recorded: boolean // whether this drag's pre-state is already on the undo stack
 }
 
 const isBar = (shape: PegShape): boolean => shape === 'flat' || shape === 'spinner'
@@ -70,6 +72,7 @@ export function Designer() {
   const [draft, setDraft] = useState<Profile | null>(null)
   const [dirty, setDirty] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>(() => (localStorage.getItem('plinko.designerTab') as Tab) || 'gate')
   const [applied, setApplied] = useState<string | null>(null)
   const [pegMode, setPegMode] = useState<PegMode>('move')
@@ -86,10 +89,16 @@ export function Designer() {
   const [gridSize, setGridSize] = useState(30)
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
   const [layoutName, setLayoutName] = useState('')
+  const [themeName, setThemeName] = useState('')
+  const [zoneWarn, setZoneWarn] = useState<{ x: number; y: number; zone: 'slot' | 'spawn' } | null>(null)
+  const [zoneDontAsk, setZoneDontAsk] = useState(false)
   const [userLayouts, setUserLayouts] = useState<Record<string, Layout>>({})
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
   const bgImgRef = useRef<HTMLImageElement | null>(null)
+  const undoRef = useRef<Profile[]>([])
+  const redoRef = useRef<Profile[]>([])
+  const draftRef = useRef<Profile | null>(null)
 
   const snap = (v: number): number => (snapGrid ? Math.round(v / gridSize) * gridSize : v)
   const newPeg = (x: number, y: number): Peg => ({
@@ -106,6 +115,26 @@ export function Designer() {
     oscillatePeriodSec: pegOscPeriod
   })
 
+  // #30: warn before placing a peg in the ball-spawn strip (top) or the slot area (bottom).
+  const zoneAt = (y: number): 'slot' | 'spawn' | null => {
+    if (!draft) return null
+    const m = buildBoardModel(draft.board, 0)
+    if (y >= m.slotAreaTop) return 'slot'
+    if (y <= m.spawn.y + 16) return 'spawn'
+    return null
+  }
+  const zoneAsked = (zone: 'slot' | 'spawn'): boolean => localStorage.getItem('plinko.dontAskZone.' + zone) === '1'
+  const placePegAt = (x: number, y: number): void => {
+    if (!draft) return
+    const W = draft.board.width
+    const doMirror = mirror && Math.abs(W - snap(x) - snap(x)) > 12
+    mutate((p) => {
+      const peg = newPeg(x, y)
+      p.board.pegs.push(peg)
+      if (doMirror) p.board.pegs.push({ ...peg, id: makeId('peg'), x: snap(W - peg.x), angle: -peg.angle, spin: -peg.spin })
+    })
+  }
+
   const refreshLayouts = useCallback((): void => {
     window.plinko?.getLayouts?.().then(setUserLayouts).catch(() => {})
   }, [])
@@ -115,6 +144,8 @@ export function Designer() {
       setDraft(p)
       setDirty(false)
       setApplied(null)
+      undoRef.current = []
+      redoRef.current = []
     })
     refreshLayouts()
   }, [refreshLayouts])
@@ -133,7 +164,19 @@ export function Designer() {
     img.src = url
   }, [draft?.theme.backgroundImage])
 
-  const mutate = (fn: (p: Profile) => void): void => {
+  // Undo/redo: snapshots of the whole draft. A drag coalesces to a single step (see the
+  // pointer handlers), and discrete edits each push one. Kept modest so big background
+  // images don't balloon memory.
+  const HISTORY_LIMIT = 60
+  const pushHistory = (): void => {
+    if (!draftRef.current) return
+    undoRef.current.push(draftRef.current)
+    if (undoRef.current.length > HISTORY_LIMIT) undoRef.current.shift()
+    redoRef.current = []
+  }
+
+  const mutate = (fn: (p: Profile) => void, record = true): void => {
+    if (record) pushHistory()
     setDraft((prev) => {
       if (!prev) return prev
       const next = structuredClone(prev)
@@ -141,6 +184,23 @@ export function Designer() {
       return next
     })
     setDirty(true)
+  }
+
+  const undo = (): void => {
+    const prev = undoRef.current.pop()
+    if (!prev || !draftRef.current) return
+    redoRef.current.push(draftRef.current)
+    setDraft(prev)
+    setDirty(true)
+    setApplied(null)
+  }
+  const redo = (): void => {
+    const next = redoRef.current.pop()
+    if (!next || !draftRef.current) return
+    undoRef.current.push(draftRef.current)
+    setDraft(next)
+    setDirty(true)
+    setApplied(null)
   }
 
   const chooseTab = (t: Tab): void => {
@@ -162,12 +222,19 @@ export function Designer() {
 
   const save = (): void => {
     if (!draft) return
-    window.plinko?.updateProfile(draft).then((p) => {
-      setDraft(p)
-      setDirty(false)
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-    })
+    setSaveError(null)
+    window.plinko
+      ?.updateProfile(draft)
+      .then((p) => {
+        setDraft(p)
+        setDirty(false)
+        setSaved(true)
+        setTimeout(() => setSaved(false), 1500)
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        setSaveError(msg.replace(/^Error:\s*/, '').slice(0, 160))
+      })
   }
 
   // Latest render inputs the animation loop reads (avoids stale closures without re-subscribing).
@@ -183,6 +250,7 @@ export function Designer() {
     pegAngle: number
   }>({ draft, grid: 0, cursor, pegMode, mirror, pegShape, pegSize, pegLength, pegAngle })
   sceneRef.current = { draft, grid: snapGrid ? gridSize : 0, cursor, pegMode, mirror, pegShape, pegSize, pegLength, pegAngle }
+  draftRef.current = draft // current draft for the undo/redo snapshots
 
   // Animate the editor canvas so spinning pegs rotate and oscillating pegs slide (with ghost
   // trails) — the streamer sees exactly what the live board will do.
@@ -278,6 +346,27 @@ export function Designer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft != null])
 
+  // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo board edits — ignored while typing in a field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if (k === 'y' || (k === 'z' && e.shiftKey)) {
+        e.preventDefault()
+        redo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const onPointerDown = (e: React.PointerEvent): void => {
     const pt = toBoard(e)
     if (!pt || !draft) return
@@ -298,6 +387,12 @@ export function Designer() {
     if (e.button !== 0) return
 
     if (pegMode === 'add') {
+      const zone = zoneAt(pt.y)
+      if (zone && !zoneAsked(zone)) {
+        setZoneDontAsk(false)
+        setZoneWarn({ x: pt.x, y: pt.y, zone })
+        return
+      }
       const base = draft.board.pegs.length
       const indices = [base]
       const doMirror = mirror && Math.abs(W - snap(pt.x) - snap(pt.x)) > 12
@@ -308,7 +403,7 @@ export function Designer() {
         // Mirror gets reflected tilt + counter-spin so the pair looks symmetric.
         if (doMirror) p.board.pegs.push({ ...peg, id: makeId('peg'), x: snap(W - peg.x), angle: -peg.angle, spin: -peg.spin })
       })
-      dragRef.current = { kind: 'place', indices, sx: e.clientX, sy: e.clientY, r0: pegSize, s0: pegSpin, a0: (pegAngle * Math.PI) / 180, l0: pegLength }
+      dragRef.current = { kind: 'place', indices, sx: e.clientX, sy: e.clientY, r0: pegSize, s0: pegSpin, a0: (pegAngle * Math.PI) / 180, l0: pegLength, recorded: true }
       return
     }
 
@@ -319,9 +414,9 @@ export function Designer() {
     const indices = [i, partner].filter((k) => k >= 0)
     if (e.shiftKey) {
       const g = draft.board.pegs[i]
-      dragRef.current = { kind: 'adjust', indices, sx: e.clientX, sy: e.clientY, r0: g.radius, s0: g.spin, a0: g.angle, l0: g.length }
+      dragRef.current = { kind: 'adjust', indices, sx: e.clientX, sy: e.clientY, r0: g.radius, s0: g.spin, a0: g.angle, l0: g.length, recorded: false }
     } else {
-      dragRef.current = { kind: 'move', indices, sx: e.clientX, sy: e.clientY, r0: 0, s0: 0, a0: 0, l0: 0 }
+      dragRef.current = { kind: 'move', indices, sx: e.clientX, sy: e.clientY, r0: 0, s0: 0, a0: 0, l0: 0, recorded: false }
     }
   }
 
@@ -334,6 +429,11 @@ export function Designer() {
     }
     if (!draft || !pt) return
     const W = draft.board.width
+    // One drag = one undo step: record the pre-drag state on the first move only.
+    if (!drag.recorded) {
+      pushHistory()
+      drag.recorded = true
+    }
 
     if (drag.kind === 'move') {
       const [i, partner] = drag.indices
@@ -346,7 +446,7 @@ export function Designer() {
           p.board.pegs[partner].x = snap(W - snap(pt.x))
           p.board.pegs[partner].y = snap(pt.y)
         }
-      })
+      }, false)
       return
     }
     // place / adjust: horizontal = LENGTH (bars) or SIZE (circle/triangle);
@@ -369,7 +469,7 @@ export function Designer() {
         if (shape === 'flat') peg.angle = sign * angle
         else if (shape === 'spinner' || shape === 'triangle') peg.spin = sign * spin
       }
-    })
+    }, false)
   }
 
   const endDrag = (e: React.PointerEvent): void => {
@@ -424,6 +524,34 @@ export function Designer() {
 
   return (
     <div className="designer">
+      {zoneWarn && (
+        <div className="modal-backdrop" onClick={() => setZoneWarn(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Place a peg in the {zoneWarn.zone === 'slot' ? 'slot' : 'ball spawn'} area?</h3>
+            <p className="muted">
+              {zoneWarn.zone === 'slot'
+                ? 'A peg down here can block balls from entering that slot.'
+                : 'A peg up here can block or deflect balls as they spawn.'}
+            </p>
+            <label className="mini">
+              <input type="checkbox" checked={zoneDontAsk} onChange={(e) => setZoneDontAsk(e.target.checked)} /> Don't ask me again
+            </label>
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button className="btn" onClick={() => setZoneWarn(null)}>Cancel</button>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  if (zoneDontAsk) localStorage.setItem('plinko.dontAskZone.' + zoneWarn.zone, '1')
+                  placePegAt(zoneWarn.x, zoneWarn.y)
+                  setZoneWarn(null)
+                }}
+              >
+                Place anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="designer-bar">
         <button className="btn primary" onClick={save} disabled={!dirty}>
           {saved ? 'Saved ✓' : dirty ? 'Save changes' : 'Saved'}
@@ -431,7 +559,18 @@ export function Designer() {
         <button className="btn" onClick={load}>
           Revert
         </button>
+        <button className="btn" onClick={undo} disabled={undoRef.current.length === 0} title="Undo (Ctrl+Z)">
+          ↶ Undo
+        </button>
+        <button className="btn" onClick={redo} disabled={redoRef.current.length === 0} title="Redo (Ctrl+Y)">
+          ↷ Redo
+        </button>
         {dirty && <span className="dirty-dot" title="unsaved changes" />}
+        {saveError && (
+          <span className="mini" style={{ color: '#ff7a7a' }} title={saveError}>
+            ⚠ Save failed: {saveError}
+          </span>
+        )}
         <span className="muted">Edits apply to your overlays live after saving.</span>
       </div>
 
@@ -556,6 +695,9 @@ export function Designer() {
 
           <section className="panel">
             <div className="panel-title">Layouts & Backup</div>
+            <p className="tiny-note" style={{ marginTop: 0 }}>
+              ⚠️ Hit <strong>Save changes</strong> first — saving a design or exporting captures the last <em>saved</em> board, not unsaved edits.
+            </p>
             <div className="row wrap">
               <input className="input" placeholder="save current as…" value={layoutName} onChange={(e) => setLayoutName(e.target.value)} />
               <button className="btn small" onClick={doSaveLayout}>Save design</button>
@@ -618,22 +760,83 @@ export function Designer() {
             {tab === 'slots' && (
               <>
                 <section className="panel">
-                  <div className="panel-title">Slots</div>
+                  <div className="panel-title">
+                    Slots <span className="hint">{draft.slots.length} slots · {Math.round(draft.slots.reduce((a, s) => a + s.widthPct, 0))}% total</span>
+                  </div>
+                  <div className="row wrap" style={{ marginBottom: 6 }}>
+                    <button
+                      className="btn small"
+                      onClick={() =>
+                        mutate((p) =>
+                          p.slots.push({
+                            index: p.slots.length,
+                            label: '',
+                            outcome: { kind: 'addTime', seconds: 15 },
+                            color: '#7a5cff',
+                            isSuper: false,
+                            widthPct: Math.round(100 / (p.slots.length + 1))
+                          })
+                        )
+                      }
+                    >
+                      + Add slot
+                    </button>
+                    <button
+                      className="btn small"
+                      disabled={draft.slots.length <= 2}
+                      onClick={() =>
+                        mutate((p) => {
+                          if (p.slots.length > 2) p.slots.pop()
+                        })
+                      }
+                    >
+                      − Remove last
+                    </button>
+                    <button className="btn small" onClick={() => mutate((p) => p.slots.forEach((s) => (s.widthPct = 100 / p.slots.length)))}>
+                      Even widths
+                    </button>
+                  </div>
                   <div className="slots-editor">
                     {draft.slots.map((slot, i) => (
-                      <SlotRow key={i} slot={slot} onChange={(patch) => mutate((p) => Object.assign(p.slots[i], patch))} onOutcome={(o) => mutate((p) => (p.slots[i].outcome = o))} />
+                      <SlotRow
+                        key={i}
+                        slot={slot}
+                        prizes={draft.prizes}
+                        onChange={(patch) => mutate((p) => Object.assign(p.slots[i], patch))}
+                        onOutcome={(o) => mutate((p) => (p.slots[i].outcome = o))}
+                        onSuper={() =>
+                          mutate((p) => {
+                            const off = p.slots[i].isSuper // re-clicking the current super slot clears it
+                            p.slots.forEach((s, k) => (s.isSuper = !off && k === i))
+                          })
+                        }
+                        onRemove={
+                          draft.slots.length > 2
+                            ? () =>
+                                mutate((p) => {
+                                  p.slots.splice(i, 1)
+                                  p.slots.forEach((s, k) => (s.index = k))
+                                })
+                            : undefined
+                        }
+                      />
                     ))}
                   </div>
+                  <p className="tiny-note">
+                    Widths are relative and normalized to fill the board — keep the total near 100% so they read as real percents.
+                    Click a slot's number to make it the ★ super slot. Applies on Save.
+                  </p>
                 </section>
                 <section className="panel">
                   <div className="panel-title">Prizes</div>
-                  <p className="muted">Reference a prize by its id in a slot's "prize" outcome.</p>
+                  <p className="muted">Pick a prize (or 🎲 Random) in a slot's Prize outcome. Win chance is per prize; stock caps how many can be given out (blank = ∞).</p>
                   <div className="slots-editor">
                     {draft.prizes.map((pz, i) => (
                       <div className="slot-row" key={i}>
                         <input className="input slot-label" placeholder="id" value={pz.id} onChange={(e) => mutate((p) => (p.prizes[i].id = e.target.value))} />
                         <input className="input" placeholder="name" value={pz.name} onChange={(e) => mutate((p) => (p.prizes[i].name = e.target.value))} />
                         <input className="input slot-val" type="number" step="0.05" min="0" max="1" title="win chance" value={pz.winChance} onChange={(e) => mutate((p) => (p.prizes[i].winChance = Number(e.target.value)))} />
+                        <input className="input slot-val" type="number" min="0" placeholder="∞" title="stock (blank = unlimited)" value={pz.stock ?? ''} onChange={(e) => mutate((p) => (p.prizes[i].stock = e.target.value === '' ? undefined : Math.max(0, Math.round(Number(e.target.value)))))} />
                         <button className="btn small" onClick={() => mutate((p) => p.prizes.splice(i, 1))}>✕</button>
                       </div>
                     ))}
@@ -656,6 +859,7 @@ export function Designer() {
                         <option value="mixed">Mixed</option>
                       </select>
                     </Field>
+                    <p className="tiny-note" style={{ margin: '0 0 4px' }}>{timerModeHelp(draft.timer.mode)}</p>
                     <HmsField label="Start time" value={draft.timer.startSeconds} onChange={(v) => mutate((p) => (p.timer.startSeconds = v))} />
                     <HmsField label="Max cap (0 = none)" value={draft.timer.maxCapSeconds ?? 0} onChange={(v) => mutate((p) => (p.timer.maxCapSeconds = v > 0 ? v : undefined))} />
                     <HmsField label="Min floor" value={draft.timer.minFloorSeconds} onChange={(v) => mutate((p) => (p.timer.minFloorSeconds = v))} />
@@ -726,8 +930,52 @@ export function Designer() {
                         <span className="swatch-name">{tp.emoji} {tp.name}</span>
                       </button>
                     ))}
+                    {draft.savedThemePresets.map((tp) => (
+                      <div key={tp.id} style={{ position: 'relative', display: 'inline-flex' }}>
+                        <button className="theme-swatch" title="Your saved theme" onClick={() => mutate((p) => applyThemePreset(p, tp.palette))}>
+                          <span className="swatch-dots">
+                            {[tp.palette.backgroundColor, tp.palette.circlePegColor, tp.palette.spinnerPegColor, tp.palette.ballColor, tp.palette.gateColor].map((c, i) => (
+                              <span key={i} className="swatch-dot" style={{ background: c }} />
+                            ))}
+                          </span>
+                          <span className="swatch-name">💾 {tp.name}</span>
+                        </button>
+                        <button
+                          title="Delete saved theme"
+                          onClick={() => mutate((p) => (p.savedThemePresets = p.savedThemePresets.filter((s) => s.id !== tp.id)))}
+                          style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: 'none', background: '#c0324a', color: '#fff', cursor: 'pointer', fontSize: 11, lineHeight: '18px', padding: 0 }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <p className="tiny-note">Recolors the board + overlays only. Keeps your peg layout & slots. Applies on Save.</p>
+                  <div className="row wrap" style={{ marginTop: 8 }}>
+                    <input className="input" placeholder="save current colors as…" value={themeName} onChange={(e) => setThemeName(e.target.value)} />
+                    <button
+                      className="btn small"
+                      onClick={() => {
+                        const name = themeName.trim()
+                        if (!name) return
+                        mutate((p) =>
+                          p.savedThemePresets.push({
+                            id: makeId('theme'),
+                            name,
+                            palette: {
+                              backgroundColor: p.theme.backgroundColor, backgroundOpacity: p.theme.backgroundOpacity,
+                              circlePegColor: p.theme.circlePegColor, flatPegColor: p.theme.flatPegColor, spinnerPegColor: p.theme.spinnerPegColor,
+                              trianglePegColor: p.theme.trianglePegColor, pegGlowColor: p.theme.pegGlowColor, frameColor: p.theme.frameColor,
+                              ballColor: p.theme.ballColor, trailColor: p.theme.trailColor, gateColor: p.theme.gateColor
+                            }
+                          })
+                        )
+                        setThemeName('')
+                      }}
+                    >
+                      Save theme
+                    </button>
+                  </div>
+                  <p className="tiny-note">Recolors the board + overlays only. Keeps your peg layout & slots. Applies on Save. Saved themes (💾) appear above with the built-ins.</p>
                 </section>
                 <section className="panel">
                   <div className="panel-title">Gameplay</div>
@@ -767,7 +1015,7 @@ export function Designer() {
                     <ColorField label="Frame" value={draft.theme.frameColor} onChange={(v) => mutate((p) => (p.theme.frameColor = v))} />
                     <ColorField label="Ball" value={draft.theme.ballColor} onChange={(v) => mutate((p) => (p.theme.ballColor = v))} />
                     <ColorField label="Trail" value={draft.theme.trailColor} onChange={(v) => mutate((p) => (p.theme.trailColor = v))} />
-                    <ColorField label="Gate" value={draft.theme.gateColor} onChange={(v) => mutate((p) => (p.theme.gateColor = v))} />
+                    <ColorField label="Super Gate" value={draft.theme.gateColor} onChange={(v) => mutate((p) => (p.theme.gateColor = v))} />
                     <ColorField label="Background" value={draft.theme.backgroundColor} onChange={(v) => mutate((p) => (p.theme.backgroundColor = v))} />
                   </div>
                   <Field label={`Background opacity (${Math.round(draft.theme.backgroundOpacity * 100)}%)`}>
@@ -786,6 +1034,14 @@ export function Designer() {
                     <Field label="Fade board when idle">
                       <input type="checkbox" checked={draft.theme.idleFade} onChange={(e) => mutate((p) => (p.theme.idleFade = e.target.checked))} />
                     </Field>
+                    {draft.theme.idleFade && (
+                      <>
+                        <Field label={`Idle opacity (${Math.round(draft.theme.idleFadeOpacity * 100)}%, 0 = hidden)`}>
+                          <input className="input" type="range" min={0} max={1} step={0.02} value={draft.theme.idleFadeOpacity} onChange={(e) => mutate((p) => (p.theme.idleFadeOpacity = Number(e.target.value)))} />
+                        </Field>
+                        <NumField label="Linger after last ball (s)" value={draft.theme.idleFadeLingerSec} onChange={(v) => mutate((p) => (p.theme.idleFadeLingerSec = Math.max(0, v)))} />
+                      </>
+                    )}
                     <Field label="Show ball names">
                       <input type="checkbox" checked={draft.theme.showBallNames} onChange={(e) => mutate((p) => (p.theme.showBallNames = e.target.checked))} />
                     </Field>
@@ -799,6 +1055,10 @@ export function Designer() {
 
             {tab === 'overlays' && (
               <>
+                <section className="panel">
+                  <div className="panel-title">Live Preview <span className="hint">unsaved edits</span></div>
+                  <OverlayPreview ot={draft.overlayTheme} />
+                </section>
                 <section className="panel accent-cyan">
                   <div className="panel-title">Overlay Style <span className="hint">timer · feed · goals</span></div>
                   <p className="muted">Style the Subathon Timer, Recent Events feed, and Goals bar overlays. Theme presets also set these.</p>
@@ -818,6 +1078,9 @@ export function Designer() {
                     <ColorField label="Accent / border" value={draft.overlayTheme.accentColor} onChange={(v) => mutate((p) => (p.overlayTheme.accentColor = v))} />
                     <ColorField label="Text" value={draft.overlayTheme.textColor} onChange={(v) => mutate((p) => (p.overlayTheme.textColor = v))} />
                     <ColorField label="Muted text" value={draft.overlayTheme.mutedColor} onChange={(v) => mutate((p) => (p.overlayTheme.mutedColor = v))} />
+                    <Field label="Hide overlays when app is closed">
+                      <input type="checkbox" checked={draft.overlayTheme.hideWhenOffline} onChange={(e) => mutate((p) => (p.overlayTheme.hideWhenOffline = e.target.checked))} />
+                    </Field>
                   </div>
                 </section>
 
@@ -901,7 +1164,8 @@ function ghostsFor(
 ): Ghost[] {
   const g: Ghost = { x, y, shape: d.pegShape, radius: d.pegSize, length: d.pegLength, angle: (d.pegAngle * Math.PI) / 180 }
   const out = [g]
-  if (mirror && Math.abs(width - x - x) > 12) out.push({ ...g, x: width - x })
+  // The mirror partner is placed with a negated angle, so preview it that way too.
+  if (mirror && Math.abs(width - x - x) > 12) out.push({ ...g, x: width - x, angle: -g.angle })
   return out
 }
 
@@ -989,7 +1253,7 @@ function drawBoard(
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  const model = buildBoardModel(draft.board, draft.slots.findIndex((s) => s.isSuper))
+  const model = buildBoardModel(draft.board, draft.slots.findIndex((s) => s.isSuper), draft.slots.map((s) => s.widthPct))
   const s = w / model.width
   const labels = w >= 240
   ctx.clearRect(0, 0, w, h)
@@ -1032,6 +1296,28 @@ function drawBoard(
       ctx.fillText(cfg?.label || String(slot.index + 1), slot.xCenter * s, (model.slotAreaTop + 40) * s)
     }
   }
+
+  // Zone guides: the ball-spawn strip (top) + slot dividers (bottom), so the builder can see
+  // where a peg would interfere with ball spawning or slot entry.
+  const sp = model.spawn
+  ctx.save()
+  ctx.fillStyle = 'rgba(92,200,255,0.10)'
+  ctx.fillRect(sp.xMin * s, 0, (sp.xMax - sp.xMin) * s, (sp.y + 16) * s)
+  ctx.strokeStyle = 'rgba(92,200,255,0.5)'
+  ctx.setLineDash([5, 4])
+  ctx.lineWidth = 1
+  ctx.strokeRect(sp.xMin * s, 1, (sp.xMax - sp.xMin) * s, (sp.y + 16) * s)
+  ctx.setLineDash([])
+  if (labels) {
+    ctx.fillStyle = 'rgba(92,200,255,0.85)'
+    ctx.font = '9px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('ball spawn', ((sp.xMin + sp.xMax) / 2) * s, 11)
+  }
+  ctx.fillStyle = draft.theme.frameColor + 'cc'
+  for (const d of model.dividers) ctx.fillRect((d.x - d.w / 2) * s, (d.y - d.h / 2) * s, d.w * s, d.h * s)
+  ctx.restore()
+
   const tsec = (time ?? 0) / 1000
   for (const p of model.pegs) {
     const color = pegColorFor(draft.theme, p.shape)
@@ -1058,7 +1344,17 @@ function drawBoard(
     const g = draft.board.gate
     ctx.strokeStyle = draft.theme.gateColor
     ctx.lineWidth = 2
-    ctx.strokeRect((g.x - g.width / 2) * s, (g.y - g.height / 2) * s, g.width * s, g.height * s)
+    let gx = g.x
+    if (time !== undefined && g.oscillate && g.oscillateRangePx > 0 && g.oscillatePeriodSec > 0) {
+      // Faint ghosts at the travel extremes, then the live position — matches the peg preview.
+      ctx.save()
+      ctx.globalAlpha = 0.16
+      ctx.strokeRect((g.x - g.oscillateRangePx - g.width / 2) * s, (g.y - g.height / 2) * s, g.width * s, g.height * s)
+      ctx.strokeRect((g.x + g.oscillateRangePx - g.width / 2) * s, (g.y - g.height / 2) * s, g.width * s, g.height * s)
+      ctx.restore()
+      gx = g.x + g.oscillateRangePx * Math.sin((2 * Math.PI * tsec) / g.oscillatePeriodSec)
+    }
+    ctx.strokeRect((gx - g.width / 2) * s, (g.y - g.height / 2) * s, g.width * s, g.height * s)
   }
 }
 
@@ -1118,37 +1414,68 @@ function drawPegShape(
 
 function SlotRow({
   slot,
+  prizes,
   onChange,
-  onOutcome
+  onOutcome,
+  onSuper,
+  onRemove
 }: {
   slot: SlotConfig
+  prizes: Prize[]
   onChange: (patch: Partial<SlotConfig>) => void
   onOutcome: (o: SlotOutcome) => void
+  onSuper: () => void
+  onRemove?: () => void
 }) {
   return (
     <div className="slot-row">
-      <span className={`slot-idx ${slot.isSuper ? 'super' : ''}`}>{slot.isSuper ? '★' : slot.index + 1}</span>
+      <button className={`slot-idx ${slot.isSuper ? 'super' : ''}`} style={{ cursor: 'pointer' }} title="Make this the super slot" onClick={onSuper}>
+        {slot.isSuper ? '★' : slot.index + 1}
+      </button>
       <input className="input slot-label" value={slot.label} onChange={(e) => onChange({ label: e.target.value })} />
       <input type="color" value={slot.color} onChange={(e) => onChange({ color: e.target.value })} />
-      <select className="input" value={slot.outcome.kind} onChange={(e) => onOutcome(defaultOutcome(e.target.value))}>
+      <select className="input" value={slot.outcome.kind} onChange={(e) => onOutcome(switchOutcome(slot.outcome, e.target.value))}>
         <option value="addTime">+time</option>
         <option value="removeTime">−time</option>
         <option value="multiplier">multiplier</option>
         <option value="prize">prize</option>
       </select>
-      <OutcomeValue outcome={slot.outcome} onOutcome={onOutcome} />
+      <OutcomeValue outcome={slot.outcome} prizes={prizes} onOutcome={onOutcome} />
+      <input
+        className="input slot-val"
+        type="number"
+        min={1}
+        step={1}
+        title="width %"
+        value={Math.round(slot.widthPct)}
+        onChange={(e) => onChange({ widthPct: Math.max(1, Number(e.target.value)) })}
+      />
+      {onRemove && (
+        <button className="btn small" title="Remove slot" onClick={onRemove}>
+          ✕
+        </button>
+      )}
     </div>
   )
 }
 
-function OutcomeValue({ outcome, onOutcome }: { outcome: SlotOutcome; onOutcome: (o: SlotOutcome) => void }) {
+function OutcomeValue({ outcome, prizes, onOutcome }: { outcome: SlotOutcome; prizes: Prize[]; onOutcome: (o: SlotOutcome) => void }) {
   if (outcome.kind === 'addTime' || outcome.kind === 'removeTime') {
     return <input className="input slot-val" type="number" value={outcome.seconds} onChange={(e) => onOutcome({ kind: outcome.kind, seconds: Number(e.target.value) })} />
   }
   if (outcome.kind === 'multiplier') {
     return <input className="input slot-val" type="number" step="0.25" value={outcome.factor} onChange={(e) => onOutcome({ kind: 'multiplier', factor: Number(e.target.value) })} />
   }
-  return <input className="input slot-val" placeholder="prizeId" value={outcome.prizeId} onChange={(e) => onOutcome({ kind: 'prize', prizeId: e.target.value, winChance: outcome.winChance })} />
+  return (
+    <select className="input slot-val" value={outcome.prizeId} onChange={(e) => onOutcome({ kind: 'prize', prizeId: e.target.value, winChance: outcome.winChance })}>
+      <option value={RANDOM_PRIZE_ID}>🎲 Random</option>
+      {prizes.map((pz) => (
+        <option key={pz.id} value={pz.id}>
+          {pz.name || pz.id}
+        </option>
+      ))}
+    </select>
+  )
 }
 
 function defaultOutcome(kind: string): SlotOutcome {
@@ -1158,18 +1485,78 @@ function defaultOutcome(kind: string): SlotOutcome {
     case 'multiplier':
       return { kind: 'multiplier', factor: 2 }
     case 'prize':
-      return { kind: 'prize', prizeId: '', winChance: 1 }
+      return { kind: 'prize', prizeId: RANDOM_PRIZE_ID, winChance: 1 }
     default:
       return { kind: 'addTime', seconds: 30 }
   }
 }
 
+// Flipping +time ⇄ −time keeps the seconds the streamer set; multiplier/prize reset to defaults.
+function switchOutcome(prev: SlotOutcome, kind: string): SlotOutcome {
+  if (kind === 'addTime' || kind === 'removeTime') {
+    const seconds = prev.kind === 'addTime' || prev.kind === 'removeTime' ? prev.seconds : 30
+    return { kind, seconds }
+  }
+  return defaultOutcome(kind)
+}
+
+function timerModeHelp(mode: TimerConfig['mode']): string {
+  switch (mode) {
+    case 'reverse':
+      return 'Reverse: ball effects are flipped so viewers race the clock DOWN — a +time slot removes time, a −time slot adds time, and a multiplier removes (base × factor). The clock still ticks down in real time if enabled below.'
+    case 'mixed':
+      return 'Mixed: slots apply exactly as set (some add, some remove) — for boards that intentionally mix +time and −time slots. A multiplier adds base × factor.'
+    default:
+      return 'Countdown: slots apply as set — +time adds, −time removes, a multiplier adds base × factor. The clock also ticks down one second per real second while running (classic subathon).'
+  }
+}
+
+function hexRgba(hex: string, op: number): string {
+  const h = (hex || '').replace('#', '')
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h
+  const n = parseInt(full, 16)
+  if (Number.isNaN(n) || full.length !== 6) return `rgba(20,16,31,${op})`
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${op})`
+}
+
+/** Live mini-preview of the timer / feed / goals overlays, styled by the current overlayTheme. */
+function OverlayPreview({ ot }: { ot: OverlayTheme }): React.ReactElement {
+  const panel = hexRgba(ot.panelColor, ot.panelOpacity)
+  const box: React.CSSProperties = { background: '#0d0716', borderRadius: 8, padding: 10 }
+  return (
+    <div style={{ display: 'grid', gap: 10, fontFamily: ot.fontFamily }}>
+      <div style={{ ...box, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+        <div style={{ background: ot.timerPanel ? panel : 'transparent', borderRadius: ot.cornerRadius, padding: '4px 12px', fontWeight: 800, fontSize: 30, fontVariantNumeric: 'tabular-nums', color: ot.timerColor, textShadow: `0 0 10px ${ot.timerGlowColor}, 0 0 24px ${ot.timerGlowColor}` }}>5:59:42</div>
+        {ot.timerShowMode && <div style={{ fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: ot.mutedColor }}>COUNTDOWN</div>}
+      </div>
+      <div style={{ ...box, display: 'grid', gap: 6 }}>
+        {([['Nova', 'gifted 5 subs', ot.feedSubColor], ['Rex', 'cheered 500 bits', ot.feedBitsColor], ['Mia', 'won a prize!', ot.feedPrizeColor]] as const).map(([n, d, c], i) => (
+          <div key={i} style={{ background: panel, borderRadius: ot.cornerRadius, padding: '5px 9px', fontSize: ot.feedFontSize, color: ot.textColor, boxShadow: `inset 0 0 0 1px ${ot.accentColor}55`, borderLeft: `3px solid ${c}` }}>
+            <strong>{n}</strong> <span style={{ color: ot.mutedColor }}>{d}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ ...box, display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+        {([['TIMER', '5:59:42', ot.goalTimerColor], ['SUBS', '128', ot.goalValueColor], ['BITS', '42k', ot.goalValueColor]] as const).map(([l, v, c], i) => (
+          <div key={i} style={{ background: panel, borderRadius: ot.cornerRadius, padding: '6px 12px', textAlign: 'center', boxShadow: `inset 0 0 0 1px ${ot.accentColor}66` }}>
+            <div style={{ fontSize: Math.min(ot.goalValueSizePx, 22), fontWeight: 800, color: c }}>{v}</div>
+            <div style={{ fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', color: ot.mutedColor }}>{l}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// A div, not a <label>: wrapping in a label makes clicking anywhere on the row proxy to the
+// control (opening color pickers / toggling checkboxes), which is hard to click out of. The
+// streamer must click the actual input/color/checkbox to change it.
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="field">
+    <div className="field">
       <span className="field-label">{label}</span>
       {children}
-    </label>
+    </div>
   )
 }
 function NumField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {

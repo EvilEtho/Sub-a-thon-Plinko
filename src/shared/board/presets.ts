@@ -788,13 +788,13 @@ export const DEFAULT_PRESET: BoardPreset = (() => {
 })()
 
 /**
- * Apply a preset onto a profile IN PLACE: replaces board pegs/gate/stuck behavior and the
+ * Apply a preset onto a profile IN PLACE: replaces board pegs + stuck behavior and the
  * visual palette + per-slot colors, while preserving the streamer's slot outcomes/labels,
- * timer, conversion rules, prizes and super-slot behavior.
+ * timer, conversion rules, prizes, super-slot behavior AND their super gate placement
+ * (importing a board design must not disturb the streamer's gameplay/super-gate setup).
  */
 export function applyPreset(profile: Profile, preset: BoardPreset): void {
   profile.board.pegs = preset.buildPegs()
-  profile.board.gate = { ...preset.gate }
   profile.board.stuckBehavior = preset.stuckBehavior
 
   // The palette keys are exactly the Theme's color fields, so this only touches visuals and

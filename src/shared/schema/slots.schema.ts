@@ -19,7 +19,9 @@ export const slotConfigSchema = z.object({
   outcome: slotOutcomeSchema,
   color: z.string().default('#ff4d8d'),
   /** The center "super slot" (exactly one on a standard board). */
-  isSuper: z.boolean().default(false)
+  isSuper: z.boolean().default(false),
+  /** Relative width of this slot as a percent; slots are normalized to fill the board. */
+  widthPct: z.number().positive().default(100 / 9)
 })
 export type SlotConfig = z.infer<typeof slotConfigSchema>
 
@@ -31,7 +33,7 @@ export function defaultSlots(): SlotConfig[] {
     color: string,
     label = '',
     isSuper = false
-  ): SlotConfig => ({ index, label, outcome, color, isSuper })
+  ): SlotConfig => ({ index, label, outcome, color, isSuper, widthPct: 100 / 9 })
   return [
     mk(0, { kind: 'addTime', seconds: 15 }, '#7a5cff', '+15s'),
     mk(1, { kind: 'multiplier', factor: 1.25 }, '#ff4d8d', '1.25x'),

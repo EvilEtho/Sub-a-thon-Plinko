@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { layoutSchema, type Layout } from '../../shared/schema/layout.schema'
-import { readJsonFile, writeJsonFileAtomic } from './jsonFile'
+import { backupCorruptFile, readJsonFile, writeJsonFileAtomic } from './jsonFile'
 
 /** Named board layouts persisted in a single JSON map. */
 export class LayoutStore {
@@ -12,7 +12,15 @@ export class LayoutStore {
   }
 
   async load(): Promise<void> {
-    const raw = await readJsonFile(this.path)
+    // A corrupt layouts.json must never crash bootstrap — back it up and start fresh.
+    let raw: unknown
+    try {
+      raw = await readJsonFile(this.path)
+    } catch (err) {
+      console.error('[LayoutStore] invalid layouts.json, backing up + resetting:', err)
+      await backupCorruptFile(this.path)
+      return
+    }
     if (raw && typeof raw === 'object') {
       const parsed: Record<string, Layout> = {}
       for (const [name, data] of Object.entries(raw as Record<string, unknown>)) {

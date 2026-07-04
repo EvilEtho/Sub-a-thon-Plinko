@@ -52,12 +52,18 @@ export interface BoardModel {
  * pegs (from the visual designer) they are used; otherwise a standard staggered grid is
  * generated. The same model drives Matter bodies and Pixi sprites.
  */
-export function buildBoardModel(board: BoardLayout, superSlotIndex = 4): BoardModel {
+export function buildBoardModel(board: BoardLayout, superSlotIndex = 4, slotWidths?: number[]): BoardModel {
   const width = board.width || DEFAULT_BOARD.width
   const height = board.height || DEFAULT_BOARD.height
   const wall = DEFAULT_BOARD.wall
-  const slotCount = DEFAULT_BOARD.slots
-  const slotWidth = (width - 2 * wall) / slotCount
+  const playW = width - 2 * wall
+  // Slot widths are relative weights (percentages); normalized so any set fills the playfield.
+  const weights =
+    slotWidths && slotWidths.length > 0
+      ? slotWidths.map((w) => (Number.isFinite(w) && w > 0 ? w : 0.0001))
+      : new Array(DEFAULT_BOARD.slots).fill(1)
+  const slotCount = weights.length
+  const totalWeight = weights.reduce((a, b) => a + b, 0) || 1
   const slotHeight = DEFAULT_BOARD.slotHeight
   const slotAreaTop = height - slotHeight
   const landingY = height - wall - PHYSICS.ballRadius - 2
@@ -77,14 +83,13 @@ export function buildBoardModel(board: BoardLayout, superSlotIndex = 4): BoardMo
     oscillatePeriodSec: p.oscillatePeriodSec
   }))
 
+  // Cumulative slot boundaries across the playfield: bounds[0] = wall … bounds[slotCount] = width-wall.
+  const bounds: number[] = [wall]
+  for (let i = 0; i < slotCount; i++) bounds.push(bounds[i] + (weights[i] / totalWeight) * playW)
+
   const dividers: RectModel[] = []
   for (let i = 1; i < slotCount; i++) {
-    dividers.push({
-      x: wall + slotWidth * i,
-      y: slotAreaTop + slotHeight / 2,
-      w: 6,
-      h: slotHeight
-    })
+    dividers.push({ x: bounds[i], y: slotAreaTop + slotHeight / 2, w: 6, h: slotHeight })
   }
 
   const walls: RectModel[] = [
@@ -95,8 +100,8 @@ export function buildBoardModel(board: BoardLayout, superSlotIndex = 4): BoardMo
 
   const slots: SlotModel[] = []
   for (let i = 0; i < slotCount; i++) {
-    const xMin = wall + slotWidth * i
-    const xMax = wall + slotWidth * (i + 1)
+    const xMin = bounds[i]
+    const xMax = bounds[i + 1]
     slots.push({ index: i, xMin, xMax, xCenter: (xMin + xMax) / 2, isSuper: i === superSlotIndex })
   }
 
@@ -105,7 +110,7 @@ export function buildBoardModel(board: BoardLayout, superSlotIndex = 4): BoardMo
     height,
     wall,
     slotCount,
-    slotWidth,
+    slotWidth: playW / slotCount,
     slotAreaTop,
     landingY,
     pegs,
@@ -123,6 +128,9 @@ export function buildBoardModel(board: BoardLayout, superSlotIndex = 4): BoardMo
 
 /** Slot index for a given x coordinate (clamped to the board). */
 export function slotForX(model: BoardModel, x: number): number {
-  const idx = Math.floor((x - model.wall) / model.slotWidth)
-  return Math.max(0, Math.min(model.slotCount - 1, idx))
+  const slots = model.slots
+  for (let i = 0; i < slots.length - 1; i++) {
+    if (x < slots[i].xMax) return i
+  }
+  return slots.length - 1
 }

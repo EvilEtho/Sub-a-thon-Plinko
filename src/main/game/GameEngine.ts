@@ -1,10 +1,12 @@
 import type { Profile, DropMode } from '../../shared/schema/profile.schema'
+import { defaultSlots } from '../../shared/schema/slots.schema'
 import type { RuntimeState, Totals } from '../../shared/schema/runtime.schema'
 import type { NormalizedEvent, QueuedBall } from '../../shared/types/events'
 import type {
   AlertPayload,
   BallSpawnPayload,
   BoardConfigPayload,
+  BoardSettingsPayload,
   ControlStatePayload,
   DropResultPayload,
   IntegrationStatusPayload,
@@ -16,6 +18,7 @@ import type {
 import { computeAward } from '../../shared/ballAward/awardRules'
 import { effectiveDonationAmount } from '../../shared/schema/rules.schema'
 import { resolveStages, type ReportedStage, type StagesResult } from '../../shared/game/resolveStages'
+import { RANDOM_PRIZE_ID, type Prize } from '../../shared/schema/prize.schema'
 import { applyTimeDelta } from '../../shared/timer/timerEngine'
 import { mulberry32, nextSeed } from '../../shared/util/seededRng'
 import { makeId } from '../../shared/util/id'
@@ -34,7 +37,9 @@ export interface Broadcaster {
   queueUpdate(p: QueueUpdatePayload): void
   controlState(p: ControlStatePayload): void
   boardConfig(p: BoardConfigPayload): void
+  boardSettings(p: BoardSettingsPayload): void
   overlayConfig(p: OverlayConfigPayload): void
+  overlayReload(): void
   integrationStatus(p: IntegrationStatusPayload): void
   prizeWinners(p: PrizeWinnersPayload): void
 }
@@ -47,6 +52,8 @@ export interface GameEngineDeps {
   journal: Journal
   broadcaster: Broadcaster
   now?: () => number
+  /** Called when the timer reaches zero and the subathon ends (drives the OBS danger zone). */
+  onSubathonEnd?: () => void
 }
 
 const SEEN_IDS_MAX = 500
@@ -72,6 +79,7 @@ export class GameEngine {
   private readonly journal: Journal
   private readonly broadcaster: Broadcaster
   private readonly now: () => number
+  private readonly onSubathonEnd?: () => void
 
   private superSlotIndex = 4
 
@@ -85,6 +93,7 @@ export class GameEngine {
     this.profileStore = deps.profileStore
     this.runtimeStore = deps.runtimeStore
     this.journal = deps.journal
+    this.onSubathonEnd = deps.onSubathonEnd
     this.broadcaster = deps.broadcaster
     this.now = deps.now ?? (() => Date.now())
     this.rebuildBoard()
@@ -183,7 +192,8 @@ export class GameEngine {
       subathonActive: this.runtime.subathonActive,
       running: this.runtime.timer.running,
       dropMode: this.profile.dropMode,
-      queueCount: this.runtime.queue.length
+      queueCount: this.runtime.queue.length,
+      idleFade: this.profile.theme.idleFade
     }
   }
 
@@ -196,7 +206,8 @@ export class GameEngine {
         index: s.index,
         label: s.label,
         color: s.color,
-        isSuper: s.isSuper
+        isSuper: s.isSuper,
+        widthPct: s.widthPct
       }))
     }
   }
@@ -212,6 +223,12 @@ export class GameEngine {
   /** Apply an edited profile: update in place (keeps shared refs), rebuild board, persist. */
   async applyProfile(next: Profile): Promise<void> {
     Object.assign(this.profile, next)
+    // A profile with zero slots would desync the physics slot count from the outcome list
+    // (a ball lands in a bin that credits nothing) — fall back to the default set.
+    if (this.profile.slots.length === 0) this.profile.slots = defaultSlots()
+    // Cancel in-flight drops: the overlay rebuilds its physics on the new board, so a pending
+    // ball would otherwise be force-credited to a random slot after its fallback timeout.
+    this.clearPending()
     this.runtime.timer.mode = this.profile.timer.mode
     this.rebuildBoard()
     await this.profileStore.save(this.profile)
@@ -232,6 +249,7 @@ export class GameEngine {
 
   private broadcastSnapshot(): void {
     this.broadcaster.boardConfig(this.boardConfigPayload())
+    this.broadcaster.boardSettings(this.boardSettingsPayload())
     this.broadcaster.overlayConfig(this.overlayConfigPayload())
     this.broadcaster.timerUpdate(this.timerState())
     this.broadcaster.goalUpdate(this.totals())
@@ -290,6 +308,34 @@ export class GameEngine {
     await this.profileStore.save(this.profile)
     this.startClocks()
     this.broadcaster.controlState(this.controlStatePayload())
+  }
+
+  boardSettingsPayload(): BoardSettingsPayload {
+    return {
+      idleFade: this.profile.theme.idleFade,
+      idleFadeOpacity: this.profile.theme.idleFadeOpacity,
+      idleFadeLingerSec: this.profile.theme.idleFadeLingerSec
+    }
+  }
+
+  /** Live idle-fade toggle from the Live tab — patches the overlay without a board rebuild. */
+  async setIdleFade(enabled: boolean): Promise<void> {
+    this.profile.theme.idleFade = enabled
+    await this.profileStore.save(this.profile)
+    this.broadcaster.boardSettings(this.boardSettingsPayload())
+    this.broadcaster.controlState(this.controlStatePayload())
+  }
+
+  async setObsConfig(cfg: {
+    enabled: boolean
+    host: string
+    port: number
+    fadeScenes: string[]
+    autoEndStream: boolean
+    autoEndDelaySec: number
+  }): Promise<void> {
+    Object.assign(this.profile.integrations.obs, cfg)
+    await this.profileStore.save(this.profile)
   }
 
   // ---- ingest ------------------------------------------------------------
@@ -454,6 +500,16 @@ export class GameEngine {
     this.finalize(ballId, this.resolve(p.stages))
   }
 
+  /** Resolve a slot's prizeId to an actual in-stock prize (handles the Random sentinel). */
+  private resolvePrize(prizeId: string): Prize | null {
+    const inStock = (pz: Prize): boolean => pz.stock === undefined || pz.stock > 0
+    if (prizeId === RANDOM_PRIZE_ID) {
+      const pool = this.profile.prizes.filter(inStock)
+      return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null
+    }
+    return this.profile.prizes.find((pz) => pz.id === prizeId) ?? null
+  }
+
   /** Credit a resolved drop (timer/totals/prize) — exactly the slot(s) the ball landed in. */
   private finalize(ballId: string, r: StagesResult): void {
     const p = this.pending.get(ballId)
@@ -473,19 +529,23 @@ export class GameEngine {
       if (appliedDelta >= 0) t.timeAddedSeconds += appliedDelta
       else t.timeRemovedSeconds += -appliedDelta
 
-      const prizeWon = !!r.prize?.won
-      if (prizeWon && r.prize) {
-        this.runtime.prizeWinners.push({
-          prizeId: r.prize.prizeId,
-          userId: ball.userId,
-          displayName: ball.displayName,
-          ballId: ball.id,
-          tsEpochMs: this.now()
-        })
-        const prize = this.profile.prizes.find((pz) => pz.id === r.prize?.prizeId)
-        if (prize && typeof prize.stock === 'number') {
-          prize.stock = Math.max(0, prize.stock - 1)
-          this.profileStore.save(this.profile).catch((e) => log.error('drop', 'prize save failed', String(e)))
+      let prizeWon = false
+      if (r.prize?.won) {
+        // Resolve Random → an actual prize, then gate on remaining stock + the prize's win chance.
+        const chosen = this.resolvePrize(r.prize.prizeId)
+        if (chosen && (chosen.stock === undefined || chosen.stock > 0) && Math.random() < chosen.winChance) {
+          prizeWon = true
+          this.runtime.prizeWinners.push({
+            prizeId: chosen.id,
+            userId: ball.userId,
+            displayName: ball.displayName,
+            ballId: ball.id,
+            tsEpochMs: this.now()
+          })
+          if (typeof chosen.stock === 'number') {
+            chosen.stock = Math.max(0, chosen.stock - 1)
+            this.profileStore.save(this.profile).catch((e) => log.error('drop', 'prize save failed', String(e)))
+          }
         }
       }
 
@@ -572,6 +632,7 @@ export class GameEngine {
       detail: 'The timer reached zero.',
       tsEpochMs: this.now()
     })
+    this.onSubathonEnd?.()
     this.broadcaster.controlState(this.controlStatePayload())
   }
 }

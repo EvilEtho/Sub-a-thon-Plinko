@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { safeStorage } from 'electron'
-import { readJsonFile, writeJsonFileAtomic } from './jsonFile'
+import { backupCorruptFile, readJsonFile, writeJsonFileAtomic } from './jsonFile'
 
 /**
  * Encrypted storage for integration tokens using Electron safeStorage (Windows DPAPI).
@@ -15,8 +15,15 @@ export class SecretStore {
   }
 
   async load(): Promise<void> {
-    const raw = await readJsonFile(this.path)
-    if (raw && typeof raw === 'object') this.cache = raw as Record<string, string>
+    // A corrupt secrets.json must never crash bootstrap — back it up and start fresh.
+    try {
+      const raw = await readJsonFile(this.path)
+      if (raw && typeof raw === 'object') this.cache = raw as Record<string, string>
+    } catch (err) {
+      console.error('[SecretStore] invalid secrets.json, backing up + resetting:', err)
+      await backupCorruptFile(this.path)
+      this.cache = {}
+    }
   }
 
   private async persist(): Promise<void> {
@@ -58,5 +65,6 @@ export class SecretStore {
 export const SecretKeys = {
   streamlabsToken: 'streamlabs.token',
   streamElementsJwt: 'streamelements.jwt',
-  twitchTokens: 'twitch.tokens' // JSON: { accessToken, refreshToken, expiresAt, scope[] }
+  twitchTokens: 'twitch.tokens', // JSON: { accessToken, refreshToken, expiresAt, scope[] }
+  obsPassword: 'obs.password'
 } as const

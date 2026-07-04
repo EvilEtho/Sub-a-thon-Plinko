@@ -28,7 +28,19 @@ export const integrationsConfigSchema = z.object({
       /** Crowd Control coin sources to EXCLUDE (e.g. coins bought with bits). */
       excludeSources: z.array(z.string()).default(['Twitch-Bits'])
     })
-    .default(() => ({ enabled: false, host: '127.0.0.1', port: 8080, excludeSources: ['Twitch-Bits'] }))
+    .default(() => ({ enabled: false, host: '127.0.0.1', port: 8080, excludeSources: ['Twitch-Bits'] })),
+  obs: z
+    .object({
+      enabled: z.boolean().default(false),
+      host: z.string().default('127.0.0.1'),
+      port: z.number().int().positive().default(4455),
+      /** Scenes where the board fades when idle; every other scene keeps it always shown. */
+      fadeScenes: z.array(z.string()).default([]),
+      /** Danger zone: auto-stop the OBS stream after the timer hits zero. */
+      autoEndStream: z.boolean().default(false),
+      autoEndDelaySec: z.number().int().min(0).max(3600).default(30)
+    })
+    .default(() => ({ enabled: false, host: '127.0.0.1', port: 4455, fadeScenes: [], autoEndStream: false, autoEndDelaySec: 30 }))
 })
 export type IntegrationsConfig = z.infer<typeof integrationsConfigSchema>
 export const defaultIntegrationsConfig = (): IntegrationsConfig => integrationsConfigSchema.parse({})

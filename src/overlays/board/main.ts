@@ -4,19 +4,17 @@ import {
   ServerEvents,
   type BallSpawnPayload,
   type BoardConfigPayload,
-  type DropResultPayload,
-  type TimerUpdatePayload
+  type BoardSettingsPayload,
+  type DropResultPayload
 } from '@shared/types/socket'
 import type { LogLevel } from '@shared/types/log'
 import { buildBoardModel } from '@shared/physics/boardModel'
 import { PHYSICS } from '@shared/physics/constants'
-import { formatDuration } from '@shared/util/time'
 import { PixiStage } from './PixiStage'
 import { PhysicsRunner } from './PhysicsRunner'
 import { AudioFx } from './AudioFx'
 
 const mount = document.getElementById('stage')!
-const clockEl = document.getElementById('clock')!
 
 const stage = new PixiStage()
 const audio = new AudioFx()
@@ -78,7 +76,7 @@ async function boot(): Promise<void> {
 
   socket.on(ServerEvents.boardConfig, (cfg: BoardConfigPayload) => {
     try {
-      const model = buildBoardModel(cfg.board, cfg.superSlotIndex)
+      const model = buildBoardModel(cfg.board, cfg.superSlotIndex, cfg.slots.map((s) => s.widthPct))
       stage.setBoard(model, cfg.slots, cfg.theme)
       runner = new PhysicsRunner(
         model,
@@ -116,11 +114,12 @@ async function boot(): Promise<void> {
 
   socket.on(ServerEvents.ballSpawn, (p: BallSpawnPayload) => {
     audio.arm()
+    stage.setActive(true) // show the board a moment before the ball reaches the pegs
     runner?.spawn(p)
   })
 
-  socket.on(ServerEvents.timerUpdate, (p: TimerUpdatePayload) => {
-    clockEl.textContent = formatDuration(p.timer.seconds)
+  socket.on(ServerEvents.boardSettings, (p: BoardSettingsPayload) => {
+    stage.patchFade(p.idleFade, p.idleFadeOpacity, p.idleFadeLingerSec)
   })
 
   // Record what the engine actually credited so a test can prove visual == payout.

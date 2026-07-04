@@ -59,7 +59,8 @@ export function App() {
     subathonActive: false,
     running: false,
     dropMode: 'auto',
-    queueCount: 0
+    queueCount: 0,
+    idleFade: false
   })
   const [queue, setQueue] = useState<QueueUpdatePayload>({ count: 0, items: [] })
   const [feed, setFeed] = useState<AlertPayload[]>([])
@@ -217,7 +218,7 @@ export function App() {
           </div>
         ) : deck === 'connect' ? (
           <div className="deck">
-            <ConnectDeck integrations={integrations} info={info} />
+            <ConnectDeck integrations={integrations} info={info} emit={emit} />
           </div>
         ) : (
           <div className="deck">
@@ -268,6 +269,10 @@ function LiveDeck({
   inject: (i: TestEventInput) => void
   gotoConnect: () => void
 }) {
+  const [bits, setBits] = useState(1000)
+  const [dono, setDono] = useState(10)
+  const [gifts, setGifts] = useState(5)
+  const [giftTier, setGiftTier] = useState<1 | 2 | 3>(1)
   return (
     <div className="live-grid">
       <div className="col">
@@ -291,6 +296,9 @@ function LiveDeck({
             {control.subathonActive ? 'Subathon active' : 'Idle'} ·{' '}
             {control.running ? 'timer running' : 'timer paused'}
           </p>
+          <label className="mini" style={{ marginTop: 6, display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={control.idleFade} onChange={(e) => emit(ClientEvents.setIdleFade, { enabled: e.target.checked })} /> Fade board when idle
+          </label>
         </section>
 
         <section className="panel">
@@ -408,7 +416,20 @@ function LiveDeck({
               </button>
             ))}
           </div>
-          <p className="tiny-note">Injects a real event through the full pipeline.</p>
+          <div className="row wrap" style={{ marginTop: 8, gap: 6, alignItems: 'center' }}>
+            <input className="input" type="number" min={1} value={bits} onChange={(e) => setBits(Math.max(1, Math.round(Number(e.target.value))))} style={{ width: 74 }} />
+            <button className="btn small" onClick={() => inject({ kind: 'bits', bits })}>Send bits</button>
+            <input className="input" type="number" min={0.01} step="0.01" value={dono} onChange={(e) => setDono(Math.max(0.01, Number(e.target.value)))} style={{ width: 74 }} />
+            <button className="btn small" onClick={() => inject({ kind: 'donation', amount: dono, currency: '$' })}>Send $</button>
+            <input className="input" type="number" min={1} value={gifts} onChange={(e) => setGifts(Math.max(1, Math.round(Number(e.target.value))))} style={{ width: 60 }} />
+            <select className="input" value={giftTier} onChange={(e) => setGiftTier(Number(e.target.value) as 1 | 2 | 3)} style={{ width: 70 }}>
+              <option value={1}>T1</option>
+              <option value={2}>T2</option>
+              <option value={3}>T3</option>
+            </select>
+            <button className="btn small" onClick={() => inject({ kind: 'giftsub', tier: giftTier, giftCount: gifts })}>Send gifts</button>
+          </div>
+          <p className="tiny-note">Injects a real event through the full pipeline. Use the boxes to test custom bits / $ / gifted subs.</p>
         </section>
       </div>
     </div>
@@ -419,10 +440,12 @@ function LiveDeck({
 
 function ConnectDeck({
   integrations,
-  info
+  info,
+  emit
 }: {
   integrations: IntegrationStatusEntry[]
   info: ServerInfo | null
+  emit: (e: string, p?: unknown) => void
 }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.25fr) minmax(0,1fr)', gap: 16, alignItems: 'start' }}>
@@ -448,6 +471,9 @@ function ConnectDeck({
           For sound effects, enable <strong>Control audio via OBS</strong> on the board source. Avoid
           hiding/showing the board source mid-stream (it reloads the page).
         </p>
+        <button className="btn small" style={{ marginTop: 6 }} onClick={() => emit(ClientEvents.reloadOverlays)}>
+          ⟳ Refresh all overlays
+        </button>
       </section>
     </div>
   )

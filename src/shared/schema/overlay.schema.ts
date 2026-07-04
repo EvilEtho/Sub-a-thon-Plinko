@@ -28,6 +28,8 @@ export const overlayThemeSchema = z.object({
   accentColor: z.string().default('#ff4d8d'),
   textColor: z.string().default('#ffffff'),
   mutedColor: z.string().default('#cbb9e6'),
+  /** Hide the overlay entirely when the app/server goes offline (avoids a frozen frame). */
+  hideWhenOffline: z.boolean().default(false),
 
   // timer overlay
   timerColor: z.string().default('#ffffff'),

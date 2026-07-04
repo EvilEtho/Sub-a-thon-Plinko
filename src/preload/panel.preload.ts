@@ -32,7 +32,15 @@ const api: PlinkoApi = {
   exportLayout: () => ipcRenderer.invoke(IpcChannels.layoutExport),
   importLayout: () => ipcRenderer.invoke(IpcChannels.layoutImport),
   exportSettings: () => ipcRenderer.invoke(IpcChannels.settingsExport),
-  importSettings: () => ipcRenderer.invoke(IpcChannels.settingsImport)
+  importSettings: () => ipcRenderer.invoke(IpcChannels.settingsImport),
+  setObsConfig: (cfg) => ipcRenderer.invoke(IpcChannels.obsSetConfig, cfg),
+  setObsPassword: (password) => ipcRenderer.invoke(IpcChannels.obsSetPassword, password),
+  obsConnect: () => ipcRenderer.invoke(IpcChannels.obsConnect),
+  obsDisconnect: () => ipcRenderer.invoke(IpcChannels.obsDisconnect),
+  obsGetScenes: () => ipcRenderer.invoke(IpcChannels.obsGetScenes),
+  onObsStatus: (cb) => {
+    ipcRenderer.on(IpcChannels.obsStatus, (_e, s) => cb(s))
+  }
 }
 
 if (process.contextIsolated) {

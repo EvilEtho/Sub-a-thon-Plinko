@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { promises as fs } from 'node:fs'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { IpcChannels } from '../shared/types/ipc'
+import { IpcChannels, type ObsConfigInput, type ObsStatusPayload } from '../shared/types/ipc'
 import { ServerEvents } from '../shared/types/socket'
 import { log, setLogSink } from './log'
 import { profileSchema } from '../shared/schema/profile.schema'
@@ -15,8 +15,9 @@ import { GameEngine } from './game/GameEngine'
 import { ProfileStore } from './persistence/ProfileStore'
 import { RuntimeStore } from './persistence/RuntimeStore'
 import { Journal } from './persistence/Journal'
-import { SecretStore } from './persistence/SecretStore'
+import { SecretStore, SecretKeys } from './persistence/SecretStore'
 import { IntegrationManager } from './integrations/IntegrationManager'
+import { ObsController } from './integrations/ObsController'
 import { setupAutoUpdate, triggerUpdateCheck, downloadAndInstall, skipUpdate, getUpdateStatus } from './updater/autoUpdate'
 
 let mainWindow: BrowserWindow | null = null
@@ -25,6 +26,8 @@ let socketServer: SocketServer | null = null
 let engine: GameEngine | null = null
 let manager: IntegrationManager | null = null
 let layoutStore: LayoutStore | null = null
+let obs: ObsController | null = null
+let secrets: SecretStore | null = null
 
 const rendererDir = join(__dirname, '../renderer')
 
@@ -102,8 +105,12 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IpcChannels.profileGet, () => engine?.getProfile())
   ipcMain.handle(IpcChannels.profileUpdate, async (_e, raw) => {
-    const parsed = profileSchema.parse(raw)
-    await engine?.applyProfile(parsed)
+    const result = profileSchema.safeParse(raw)
+    if (!result.success) {
+      const issue = result.error.issues[0]
+      throw new Error(`Invalid ${issue?.path.join('.') || 'value'}: ${issue?.message ?? 'validation failed'}`)
+    }
+    await engine?.applyProfile(result.data)
     return engine?.getProfile()
   })
 
@@ -163,6 +170,21 @@ function registerIpcHandlers(): void {
     await engine.applyProfile(profileSchema.parse(raw))
     return engine.getProfile()
   })
+
+  ipcMain.handle(IpcChannels.obsSetConfig, async (_e, cfg: ObsConfigInput) => {
+    if (!engine || !obs) return
+    await engine.setObsConfig(cfg)
+    await obs.disconnect()
+    if (cfg.enabled) await obs.connect(cfg.host, cfg.port, secrets?.get(SecretKeys.obsPassword) ?? '')
+  })
+  ipcMain.handle(IpcChannels.obsSetPassword, (_e, pw: string) => secrets?.set(SecretKeys.obsPassword, pw))
+  ipcMain.handle(IpcChannels.obsConnect, async () => {
+    if (!engine || !obs) return
+    const o = engine.getProfile().integrations.obs
+    await obs.connect(o.host, o.port, secrets?.get(SecretKeys.obsPassword) ?? '')
+  })
+  ipcMain.handle(IpcChannels.obsDisconnect, () => obs?.disconnect())
+  ipcMain.handle(IpcChannels.obsGetScenes, () => obs?.getScenes() ?? [])
 }
 
 async function bootstrap(): Promise<void> {
@@ -182,7 +204,7 @@ async function bootstrap(): Promise<void> {
     runtime.timer.mode = profile.timer.mode
   }
 
-  const secrets = new SecretStore(dataDir)
+  secrets = new SecretStore(dataDir)
   await secrets.load()
 
   layoutStore = new LayoutStore(dataDir)
@@ -197,7 +219,14 @@ async function bootstrap(): Promise<void> {
     profileStore,
     runtimeStore,
     journal,
-    broadcaster: socketServer.broadcaster
+    broadcaster: socketServer.broadcaster,
+    onSubathonEnd: () => {
+      const o = engine?.getProfile().integrations.obs
+      if (o?.enabled && o.autoEndStream && obs?.isConnected()) {
+        log.warn('obs', `timer hit zero — auto-ending stream in ${o.autoEndDelaySec}s`)
+        setTimeout(() => void obs?.stopStream(), o.autoEndDelaySec * 1000)
+      }
+    }
   })
 
   manager = new IntegrationManager({
@@ -210,6 +239,27 @@ async function bootstrap(): Promise<void> {
     },
     onStatus: (p) => socketServer?.broadcaster.integrationStatus(p)
   })
+
+  try {
+    obs = new ObsController({
+      onScene: (scene) => {
+        const o = engine?.getProfile().integrations.obs
+        if (!o?.enabled) return
+        // Scenes in fadeScenes fade the board when idle; every other scene keeps it always shown.
+        void engine?.setIdleFade(o.fadeScenes.includes(scene))
+      },
+      onStatus: (status, detail, scenes) => {
+        const payload: ObsStatusPayload = { status, detail, scenes }
+        mainWindow?.webContents.send(IpcChannels.obsStatus, payload)
+      }
+    })
+    if (profile.integrations.obs.enabled) {
+      const o = profile.integrations.obs
+      void obs.connect(o.host, o.port, secrets.get(SecretKeys.obsPassword) ?? '')
+    }
+  } catch (e) {
+    log.error('obs', 'OBS init failed — continuing without it', String(e))
+  }
 
   bindEngineToSocket(socketServer.io, engine, () => manager!.getStatusPayload())
   await engine.init()
@@ -231,7 +281,12 @@ if (!gotSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     registerIpcHandlers()
-    await bootstrap()
+    // A failure in one integration must never prevent the window from opening.
+    try {
+      await bootstrap()
+    } catch (e) {
+      log.error('server', 'bootstrap failed — opening the window anyway', String(e))
+    }
     createWindow()
     void setupAutoUpdate()
 

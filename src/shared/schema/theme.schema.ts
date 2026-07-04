@@ -21,6 +21,10 @@ export const themeSchema = z.object({
   backgroundOpacity: z.number().min(0).max(1).default(0.2),
   /** Fade the board out when no balls are dropping, and in while balls are active. */
   idleFade: z.boolean().default(false),
+  /** How faded the board gets when idle: 0 = fully hidden, 1 = no fade. */
+  idleFadeOpacity: z.number().min(0).max(1).default(0.12),
+  /** Keep the board visible this many seconds after the last ball before fading out. */
+  idleFadeLingerSec: z.number().min(0).max(30).default(2.5),
   /** Show each ball owner's name on/under the ball. */
   showBallNames: z.boolean().default(true),
   /** Use the viewer's Twitch profile picture as their ball (falls back to a colored ball). */

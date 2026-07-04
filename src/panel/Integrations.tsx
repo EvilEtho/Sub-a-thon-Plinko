@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { IntegrationStatusEntry } from '@shared/types/socket'
-import type { DeviceCodeInfo } from '@shared/types/ipc'
+import type { DeviceCodeInfo, ObsStatusPayload } from '@shared/types/ipc'
 
 const LABELS: Record<string, string> = {
   twitch: 'Twitch (subs / bits)',
@@ -24,6 +24,7 @@ export function Integrations({ integrations }: { integrations: IntegrationStatus
         />
         <TokenRow id="streamelements" entry={byId('streamelements')} placeholder="StreamElements JWT" />
         <StreamerbotRow entry={byId('streamerbot')} />
+        <ObsRow />
       </div>
     </section>
   )
@@ -220,6 +221,126 @@ function StreamerbotRow({ entry }: { entry?: IntegrationStatusEntry }) {
         In Streamer.bot, add an action on the Crowd Control coin-exchange trigger that does a
         WebSocket Broadcast (Custom) with{' '}
         <code>{'{ "plinko":"ccCoins", "user":"...", "coins":500, "source":"..." }'}</code>.
+      </p>
+    </div>
+  )
+}
+
+function ObsRow() {
+  const [enabled, setEnabled] = useState(false)
+  const [host, setHost] = useState('127.0.0.1')
+  const [port, setPort] = useState('4455')
+  const [password, setPassword] = useState('')
+  const [fadeScenes, setFadeScenes] = useState<string[]>([])
+  const [autoEnd, setAutoEnd] = useState(false)
+  const [autoEndDelay, setAutoEndDelay] = useState('30')
+  const [status, setStatus] = useState<ObsStatusPayload>({ status: 'disconnected', scenes: [] })
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    window.plinko
+      .getProfile()
+      .then((p) => {
+        const o = p.integrations.obs
+        setEnabled(o.enabled)
+        setHost(o.host)
+        setPort(String(o.port))
+        setFadeScenes(o.fadeScenes)
+        setAutoEnd(o.autoEndStream)
+        setAutoEndDelay(String(o.autoEndDelaySec))
+      })
+      .catch(() => {})
+    window.plinko.onObsStatus((s) => setStatus(s))
+    window.plinko.obsGetScenes().then((sc) => setStatus((prev) => ({ ...prev, scenes: sc }))).catch(() => {})
+  }, [])
+
+  const scenes = status.scenes
+  const toggleScene = (name: string): void =>
+    setFadeScenes((prev) => (prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name]))
+  const save = (): void => {
+    if (password) window.plinko.setObsPassword(password)
+    window.plinko
+      .setObsConfig({
+        enabled,
+        host: host.trim() || '127.0.0.1',
+        port: parseInt(port, 10) || 4455,
+        fadeScenes,
+        autoEndStream: autoEnd,
+        autoEndDelaySec: parseInt(autoEndDelay, 10) || 0
+      })
+      .then(() => {
+        setPassword('')
+        setSaved(true)
+        setTimeout(() => setSaved(false), 1500)
+      })
+  }
+
+  return (
+    <div className="int-row">
+      <div className="int-head">
+        <strong>OBS (scene fade + danger zone)</strong>
+        <span className={`int-dot int-${status.status}`} title={status.detail ?? status.status}>
+          ● <span className="muted">{status.status}</span>
+          {status.detail ? <span className="muted"> · {status.detail}</span> : null}
+        </span>
+      </div>
+      <div className="row wrap">
+        <input className="input" value={host} onChange={(e) => setHost(e.target.value)} placeholder="host" />
+        <input className="input port" value={port} onChange={(e) => setPort(e.target.value)} placeholder="port" />
+        <input
+          className="input"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="OBS WS password"
+        />
+      </div>
+      <div className="row wrap">
+        <label className="mini">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
+        </label>
+        <button className="btn small" onClick={save}>
+          {saved ? 'Saved ✓' : 'Save & connect'}
+        </button>
+        <button className="btn small" onClick={() => window.plinko.obsConnect()}>
+          Reconnect
+        </button>
+        <button className="btn small" onClick={() => window.plinko.obsDisconnect()}>
+          Disconnect
+        </button>
+      </div>
+      <div className="well" style={{ marginTop: 8 }}>
+        <div className="mini" style={{ marginBottom: 4 }}>
+          Scenes that <strong>fade the board when idle</strong> (every other scene keeps it always shown):
+        </div>
+        {scenes.length === 0 ? (
+          <p className="tiny-note" style={{ margin: 0 }}>Connect to load your OBS scenes.</p>
+        ) : (
+          <div className="row wrap">
+            {scenes.map((sc) => (
+              <label key={sc} className="mini">
+                <input type="checkbox" checked={fadeScenes.includes(sc)} onChange={() => toggleScene(sc)} /> {sc}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="well" style={{ marginTop: 8 }}>
+        <label className="mini">
+          <input type="checkbox" checked={autoEnd} onChange={(e) => setAutoEnd(e.target.checked)} /> ⚠️ Danger zone: auto-end
+          the stream when the timer hits 0
+        </label>
+        {autoEnd && (
+          <div className="row wrap" style={{ marginTop: 6, alignItems: 'center', gap: 6 }}>
+            <span className="mini">Wait</span>
+            <input className="input port" value={autoEndDelay} onChange={(e) => setAutoEndDelay(e.target.value)} />
+            <span className="mini">seconds, then StopStream.</span>
+          </div>
+        )}
+      </div>
+      <p className="tiny-note" style={{ margin: '6px 0 0' }}>
+        Enable OBS's server first: <strong>Tools → WebSocket Server Settings → Enable</strong> (default port 4455), set a
+        password, then Save &amp; connect.
       </p>
     </div>
   )

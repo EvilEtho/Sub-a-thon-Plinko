@@ -40,7 +40,9 @@ export const ServerEvents = {
   queueUpdate: 'queue:update',
   controlState: 'control:state',
   boardConfig: 'board:config',
+  boardSettings: 'board:settings',
   overlayConfig: 'overlay:config',
+  overlayReload: 'overlay:reload',
   integrationStatus: 'integration:status',
   prizeWinners: 'prize:winners',
   devLog: 'dev:log'
@@ -53,7 +55,9 @@ export const ClientEvents = {
   stop: 'ctrl:stop',
   reset: 'ctrl:reset',
   setDropMode: 'ctrl:setDropMode',
+  setIdleFade: 'ctrl:setIdleFade',
   dropNext: 'ctrl:dropNext',
+  reloadOverlays: 'ctrl:reloadOverlays',
   testEvent: 'ctrl:testEvent',
   clientLog: 'client:log',
   stageLanded: 'stage:landed'
@@ -94,6 +98,7 @@ export interface BoardSlotInfo {
   label: string
   color: string
   isSuper: boolean
+  widthPct: number
 }
 
 export interface BoardConfigPayload {
@@ -126,6 +131,7 @@ export interface ControlStatePayload {
   running: boolean
   dropMode: DropMode
   queueCount: number
+  idleFade: boolean
 }
 
 export interface AlertPayload {
@@ -151,6 +157,17 @@ export interface TestEventInput {
 
 export interface SetDropModePayload {
   mode: DropMode
+}
+
+export interface SetIdleFadePayload {
+  enabled: boolean
+}
+
+/** Live-patchable board overlay settings (applied without a full board rebuild). */
+export interface BoardSettingsPayload {
+  idleFade: boolean
+  idleFadeOpacity: number
+  idleFadeLingerSec: number
 }
 
 /** Sent by the board overlay when a ball's stage physically lands (real slot + gate). */

@@ -9,7 +9,8 @@ const slot = (index: number, outcome: SlotOutcome): SlotConfig => ({
   label: '',
   outcome,
   color: '#fff',
-  isSuper: false
+  isSuper: false,
+  widthPct: 100 / 9
 })
 const slots: SlotConfig[] = [
   slot(0, { kind: 'addTime', seconds: 100 }),

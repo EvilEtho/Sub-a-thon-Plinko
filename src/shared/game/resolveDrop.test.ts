@@ -15,7 +15,8 @@ const slot = (index: number, outcome: SlotOutcome, isSuper = false): SlotConfig 
   label: '',
   outcome,
   color: '#fff',
-  isSuper
+  isSuper,
+  widthPct: 100 / 9
 })
 
 const timer = (over: Partial<TimerConfig> = {}): TimerConfig => ({

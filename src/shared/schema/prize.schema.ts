@@ -11,3 +11,6 @@ export const prizeSchema = z.object({
   note: z.string().optional()
 })
 export type Prize = z.infer<typeof prizeSchema>
+
+/** Sentinel prizeId for a slot that awards a random in-stock prize. */
+export const RANDOM_PRIZE_ID = '__random__'

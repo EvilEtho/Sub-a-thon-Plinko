@@ -8,6 +8,7 @@ import {
   type HelloPayload,
   type IntegrationStatusPayload,
   type SetDropModePayload,
+  type SetIdleFadePayload,
   type StageLandedPayload,
   type TestEventInput,
   type TimerUpdatePayload
@@ -41,7 +42,9 @@ export function createSocketServer(httpServer: HttpServer): SocketServer {
     queueUpdate: (p) => io.emit(ServerEvents.queueUpdate, p),
     controlState: (p) => io.emit(ServerEvents.controlState, p),
     boardConfig: (p) => io.emit(ServerEvents.boardConfig, p),
+    boardSettings: (p) => io.emit(ServerEvents.boardSettings, p),
     overlayConfig: (p) => io.emit(ServerEvents.overlayConfig, p),
+    overlayReload: () => io.emit(ServerEvents.overlayReload),
     integrationStatus: (p) => io.emit(ServerEvents.integrationStatus, p),
     prizeWinners: (p) => io.emit(ServerEvents.prizeWinners, p)
   }
@@ -82,6 +85,13 @@ export function bindEngineToSocket(
     socket.on(ClientEvents.setDropMode, (p: SetDropModePayload) => {
       log.info('cmd', `set drop mode: ${p.mode}`)
       void engine.setDropMode(p.mode)
+    })
+    socket.on(ClientEvents.setIdleFade, (p: SetIdleFadePayload) => {
+      void engine.setIdleFade(!!p?.enabled)
+    })
+    socket.on(ClientEvents.reloadOverlays, () => {
+      log.info('cmd', 'reload overlays')
+      io.emit(ServerEvents.overlayReload)
     })
     socket.on(ClientEvents.dropNext, () => engine.dropNext())
     socket.on(ClientEvents.stageLanded, (p: StageLandedPayload) => {

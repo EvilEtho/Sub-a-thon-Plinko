@@ -37,6 +37,7 @@ interface ActiveBall {
   checkStep: number
   redrops: number
   noclipped: boolean
+  escapes: number
 }
 
 /** Tunable "stuck ball" detection (from the board config). */
@@ -55,6 +56,7 @@ const CAT_WALL = 0x0001
 const CAT_PEG = 0x0002
 const CAT_BALL = 0x0004
 const MAX_REDROPS = 3
+const MAX_ESCAPES = 3
 const MAX_ACTIVE_BALLS = 90
 const degPerSecToRadPerStep = (deg: number): number => ((deg * Math.PI) / 180) * (PHYSICS.timeStepMs / 1000)
 
@@ -133,7 +135,8 @@ export class PhysicsRunner {
       checkY: this.model.spawn.y,
       checkStep: 0,
       redrops: 0,
-      noclipped: false
+      noclipped: false,
+      escapes: 0
     })
   }
 
@@ -181,6 +184,18 @@ export class PhysicsRunner {
       return
     }
     ball.steps++
+
+    // Escaped the board (tunneled a wall or popped out the top) — respawn at the top so a ball
+    // is never lost. Give up after a few tries and just settle it wherever it is.
+    if (this.hasEscaped(ball)) {
+      if (ball.escapes < MAX_ESCAPES) {
+        ball.escapes++
+        this.respawnTop(ball)
+      } else {
+        this.land(ball)
+      }
+      return
+    }
 
     // Real gate passage (no steering — the ball goes where physics takes it).
     if (this.gateRect && !ball.passedGate) {
@@ -233,6 +248,25 @@ export class PhysicsRunner {
       // 'remove' (or redrop exhausted): settle it where it is.
       this.land(ball)
     }
+  }
+
+  private hasEscaped(ball: ActiveBall): boolean {
+    const r = PHYSICS.ballRadius
+    const { x, y } = ball.body.position
+    return x < -r || x > this.model.width + r || y < -30
+  }
+
+  private respawnTop(ball: ActiveBall): void {
+    const sx = this.model.spawn.xMin + Math.random() * (this.model.spawn.xMax - this.model.spawn.xMin)
+    Body.setPosition(ball.body, { x: sx, y: this.model.spawn.y })
+    Body.setVelocity(ball.body, { x: (Math.random() - 0.5) * 3, y: 0 })
+    // Restore normal collision in case it had noclipped through the map.
+    ball.body.collisionFilter.mask = CAT_WALL | CAT_PEG
+    ball.noclipped = false
+    ball.steps = 0
+    ball.checkStep = 0
+    ball.checkX = sx
+    ball.checkY = this.model.spawn.y
   }
 
   private land(ball: ActiveBall): void {

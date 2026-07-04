@@ -18,8 +18,10 @@
         position: absolute;
         inset: 0;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
+        gap: 0.4vmin;
       }
       .timer {
         font-size: var(--timer-size, 16vmin);
@@ -37,13 +39,14 @@
         background: var(--panel, rgba(20, 16, 31, 0.82));
       }
       .mode {
-        position: absolute;
-        bottom: 6vmin;
         font-size: 3vmin;
         text-transform: uppercase;
         letter-spacing: 0.6vmin;
         color: var(--muted, #ffb3d1);
         opacity: 0.85;
+      }
+      .mode:empty {
+        display: none;
       }
     </style>
   </head>

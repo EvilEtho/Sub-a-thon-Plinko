@@ -1,6 +1,6 @@
 {
   "name": "Sub-a-thon-Plinko",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Twitch Sub-a-thon Plinko overlay & tracker",
   "main": "./out/main/index.js",
   "author": "Evilee",
@@ -26,6 +26,7 @@
     "electron-updater": "^6.8.9",
     "express": "^5.2.1",
     "matter-js": "^0.20.0",
+    "obs-websocket-js": "^5.0.8",
     "pixi.js": "^8.19.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

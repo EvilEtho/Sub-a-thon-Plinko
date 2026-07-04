@@ -33,7 +33,13 @@ export const IpcChannels = {
   layoutExport: 'layouts:export',
   layoutImport: 'layouts:import',
   settingsExport: 'settings:export',
-  settingsImport: 'settings:import'
+  settingsImport: 'settings:import',
+  obsSetConfig: 'obs:setConfig',
+  obsSetPassword: 'obs:setPassword',
+  obsConnect: 'obs:connect',
+  obsDisconnect: 'obs:disconnect',
+  obsGetScenes: 'obs:getScenes',
+  obsStatus: 'obs:status'
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]
@@ -63,6 +69,21 @@ export interface StreamerbotConfigInput {
   host: string
   port: number
   excludeSources: string[]
+}
+
+export interface ObsConfigInput {
+  enabled: boolean
+  host: string
+  port: number
+  fadeScenes: string[]
+  autoEndStream: boolean
+  autoEndDelaySec: number
+}
+
+export interface ObsStatusPayload {
+  status: 'disconnected' | 'connecting' | 'connected' | 'error'
+  detail?: string
+  scenes: string[]
 }
 
 /** Auto-update state pushed from main to the panel. */
@@ -111,4 +132,10 @@ export interface PlinkoApi {
   importLayout: () => Promise<Profile | null>
   exportSettings: () => Promise<void>
   importSettings: () => Promise<Profile | null>
+  setObsConfig: (cfg: ObsConfigInput) => Promise<void>
+  setObsPassword: (password: string) => Promise<void>
+  obsConnect: () => Promise<void>
+  obsDisconnect: () => Promise<void>
+  obsGetScenes: () => Promise<string[]>
+  onObsStatus: (cb: (s: ObsStatusPayload) => void) => void
 }
